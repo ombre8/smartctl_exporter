@@ -14,7 +14,14 @@
 package main
 
 import (
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestBuildDeviceLabel(t *testing.T) {
@@ -40,5 +47,49 @@ func TestBuildDeviceLabel(t *testing.T) {
 		if result != test.expectedLabel {
 			t.Errorf("deviceName=%v deviceType=%v expected=%v result=%v", test.deviceName, test.deviceType, test.expectedLabel, result)
 		}
+	}
+}
+
+// TestPedanticRegistryCollectsAllFixtures collects metrics for every
+// testdata fixture inside a pedantic registry, which fails if Collect
+// emits a metric whose descriptor was not returned by Describe.
+func TestPedanticRegistryCollectsAllFixtures(t *testing.T) {
+	*smartctlFakeData = true
+	t.Cleanup(func() { *smartctlFakeData = false })
+
+	fixtures, err := filepath.Glob("testdata/*.json")
+	if err != nil || len(fixtures) == 0 {
+		t.Fatalf("no testdata fixtures found: %v", err)
+	}
+
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "debug"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var devices []Device
+	for _, fixture := range fixtures {
+		name := strings.TrimSuffix(filepath.Base(fixture), ".json")
+		data, err := os.ReadFile(fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "debug", name+".json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		devices = append(devices, Device{Name: name, Type: "auto", Label: name})
+	}
+	t.Chdir(tmp)
+
+	collector := &SMARTctlManagerCollector{
+		Devices: devices,
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	reg := prometheus.NewPedanticRegistry()
+	if err := reg.Register(collector); err != nil {
+		t.Fatalf("registering collector: %v", err)
+	}
+	if _, err := reg.Gather(); err != nil {
+		t.Errorf("gathering metrics: %v", err)
 	}
 }
